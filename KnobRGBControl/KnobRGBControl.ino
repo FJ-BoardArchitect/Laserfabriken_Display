@@ -39,18 +39,21 @@ SemaphoreHandle_t mutex;
 
 // value[0] = power (%, 0–100)
 // value[1] = laser wavelength (nm, 1540.00–1560.00)
-float value[2] = {0.0f, 1550.0f};
+// float value[2] = {0.0f, 1550.0f};
+float value[3] = {0.0f, 30.0f, 25.0f};
 bool  laser_on  = false;
 
 float       step[2]   = {1.0f,   1.0f};
-const float minVal[2] = {0.0f,  1540.0f};
-const float maxVal[2] = {100.0f, 1560.0f};
+// const float minVal[2] = {0.0f,  1540.0f};
+// const float maxVal[2] = {100.0f, 1560.0f};
+const float minVal[2] = {0.0f,  -20.0f};
+const float maxVal[2] = {100.0f, 140.0f};
 
 static int         lw_step_idx = 0; // 0=1, 1=0.1, 2=0.01
 static const float lw_steps[]  = {1.0f, 0.1f, 0.01f};
 static lv_obj_t  * ui_lwStepLabel = NULL;
 
-int chosen = 0;
+int chosen = 1;
 
 #define DIM_TIMEOUT_MS  5000
 #define BRIGHT_DUTY     40
@@ -111,7 +114,8 @@ void lv_example_meter_2(void)
     lv_obj_set_style_border_width(meter2, 0, LV_PART_MAIN);
 
     lv_meter_scale_t * scale = lv_meter_add_scale(meter2);
-    lv_meter_set_scale_range(meter2, scale, 15400, 15600, 270, 135);
+    // lv_meter_set_scale_range(meter2, scale, 15400, 15600, 270, 135);
+    lv_meter_set_scale_range(meter2, scale, -200, 1400, 270, 135);
     lv_meter_set_scale_ticks(meter2, scale, 41, 2, 8, lv_palette_main(LV_PALETTE_GREY));
     lv_meter_set_scale_major_ticks(meter2, scale, 10, 3, 11, lv_color_white(), 10);
     lv_obj_set_style_text_font(meter2, &lv_font_montserrat_10, LV_PART_TICKS | LV_STATE_DEFAULT);
@@ -119,7 +123,8 @@ void lv_example_meter_2(void)
 
     needle2 = lv_meter_add_needle_line(meter2, scale, 3, lv_color_hex(0xFFFFFF), -10);
 
-    lv_arc_set_range(ui_Arc2, 15400, 15600);
+    // lv_arc_set_range(ui_Arc2, 15400, 15600);
+    lv_arc_set_range(ui_Arc2, -200, 1400);
 }
 
 void lv_example_meter_3(void) {}  // removed
@@ -180,7 +185,7 @@ static void send_5v_state(void)
 
 // ── Receiving state pushed from the STM32 ───────────────────────────────────
 
-/* The STM32 pushes these same four lines back at us whenever the relevant
+/* The STM32 pushes these lines back at us whenever the relevant
  * parameter changes on its side -- at boot (restoring saved params), from
  * a USB CLI command, or from something autonomous like the laser temp
  * guard auto-disabling the laser. This is what keeps the screen in sync
@@ -199,6 +204,8 @@ static void process_stm_line(const char *line)
         value[0] = (float)ival;
     } else if (sscanf(line, "set crystal.wavelength %f", &fval) == 1) {
         value[1] = fval;
+    } else if (sscanf(line, "crystal.temp %f", &fval) == 1) {
+        value[2] = fval;
     } else if (strcmp(line, "laser on") == 0) {
         laser_on = true;
     } else if (strcmp(line, "laser off") == 0) {
@@ -208,6 +215,7 @@ static void process_stm_line(const char *line)
     } else if (strcmp(line, "5v off") == 0) {
         v5_on = false;
     }
+
     /* anything else (e.g. the STM32's own "OK ..."/"ERR ..." replies to
      * whatever this screen just sent) is silently ignored -- not one of
      * the four synced parameters */
@@ -245,24 +253,24 @@ static void update_laser_button_ui(void)
 {
     lv_obj_t * lbl = lv_obj_get_child(ui_laserBtn, 0);
     if (laser_on) {
-        lv_label_set_text(lbl, "laser on");
+        lv_label_set_text(lbl, "TEC ON");
         lv_obj_set_style_bg_color(ui_laserBtn, lv_color_hex(0x006600), LV_PART_MAIN | LV_STATE_DEFAULT);
     } else {
-        lv_label_set_text(lbl, "laser off");
+        lv_label_set_text(lbl, "TEC OFF");
         lv_obj_set_style_bg_color(ui_laserBtn, lv_color_hex(0x880000), LV_PART_MAIN | LV_STATE_DEFAULT);
     }
 }
 
 static void update_5v_button_ui(void)
 {
-    lv_obj_t * lbl = lv_obj_get_child(ui_5vBtn, 0);
-    if (v5_on) {
-        lv_label_set_text(lbl, "5v on");
-        lv_obj_set_style_bg_color(ui_5vBtn, lv_color_hex(0x006600), LV_PART_MAIN | LV_STATE_DEFAULT);
-    } else {
-        lv_label_set_text(lbl, "5v off");
-        lv_obj_set_style_bg_color(ui_5vBtn, lv_color_hex(0x880000), LV_PART_MAIN | LV_STATE_DEFAULT);
-    }
+    // lv_obj_t * lbl = lv_obj_get_child(ui_5vBtn, 0);
+    // if (v5_on) {
+    //     lv_label_set_text(lbl, "5v ON");
+    //     lv_obj_set_style_bg_color(ui_5vBtn, lv_color_hex(0x006600), LV_PART_MAIN | LV_STATE_DEFAULT);
+    // } else {
+    //     lv_label_set_text(lbl, "5v OFF");
+    //     lv_obj_set_style_bg_color(ui_5vBtn, lv_color_hex(0x880000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    // }
 }
 
 void laser_btn_event_cb(lv_event_t * e)
@@ -290,7 +298,7 @@ void lv_create_laser_button(void)
     lv_obj_add_event_cb(ui_laserBtn, laser_btn_event_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t * lbl = lv_label_create(ui_laserBtn);
-    lv_label_set_text(lbl, "laser off");
+    lv_label_set_text(lbl, "TEC OFF");
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_center(lbl);
 }
@@ -375,11 +383,11 @@ void setup()
      * polled afterward from the render loop. Only one indev is registered
      * on this board (the touch panel), so the first one is it. */
     s_touch_indev = lv_indev_get_next(NULL);
-    lv_example_meter_1();
+    // lv_example_meter_1();
     lv_example_meter_2();
     lv_create_laser_wl_step_ui();
     lv_create_laser_button();
-    lv_create_5v_button();
+    // lv_create_5v_button();
 
     set_active_meter(chosen);
     lcd_bl_pwm_bsp_init(BRIGHT_DUTY);
@@ -431,7 +439,7 @@ static void user_encoder_loop_task(void *arg)
 
 static void example_lvgl_port_task(void *arg)
 {
-    float prev[2]          = {-1.0f, -1.0f};
+    float prev[3]          = {-1.0f, -1.0f, -1.0f};
     bool  lo               = false;
     bool  prev_laser_on    = false;
     bool  prev_v5_on       = false;
@@ -466,20 +474,24 @@ static void example_lvgl_port_task(void *arg)
 
             lo = laser_on;
 
-            if (value[0] != prev[0]) {
-                prev[0] = value[0];
-                snprintf(buf, sizeof(buf), "%d%%", (int)value[0]);
-                lv_label_set_text(ui_power, buf);
-                lv_meter_set_indicator_value(meter, needle, (int)value[0]);
-                lv_arc_set_value(ui_Arc1, (int)value[0]);
-            }
+            // if (value[0] != prev[0]) {
+            //     prev[0] = value[0];
+            //     snprintf(buf, sizeof(buf), "%d%%", (int)value[0]);
+            //     lv_label_set_text(ui_power, buf);
+            //     lv_meter_set_indicator_value(meter, needle, (int)value[0]);
+            //     lv_arc_set_value(ui_Arc1, (int)value[0]);
+            // }
 
             if (value[1] != prev[1]) {
                 prev[1] = value[1];
                 snprintf(buf, sizeof(buf), "%.2f", value[1]);
                 lv_label_set_text(ui_power1, buf);
-                lv_meter_set_indicator_value(meter2, needle2, (int)(value[1] * 10.0f));
                 lv_arc_set_value(ui_Arc2, (int)(value[1] * 10.0f));
+            }
+
+            if (value[2] != prev[2]) {
+                prev[2] = value[2];
+                lv_meter_set_indicator_value(meter2, needle2, (int)(value[2] * 10.0f));
             }
 
             if (laser_on != prev_laser_on) {
@@ -555,12 +567,12 @@ void meter2_event_cb(lv_event_t * e)
 }
 void set_active_meter(int index)
 {
-    lv_obj_set_style_border_width(meter,  0, LV_PART_MAIN);
+    // lv_obj_set_style_border_width(meter,  0, LV_PART_MAIN);
     lv_obj_set_style_border_width(meter2, 0, LV_PART_MAIN);
     switch (index) {
         case 0:
-            lv_obj_set_style_border_width(meter, 2, LV_PART_MAIN);
-            lv_obj_set_style_border_color(meter, lv_color_hex(0x574509), LV_PART_MAIN);
+            // lv_obj_set_style_border_width(meter, 2, LV_PART_MAIN);
+            // lv_obj_set_style_border_color(meter, lv_color_hex(0x574509), LV_PART_MAIN);
             break;
         case 1:
             lv_obj_set_style_border_width(meter2, 2, LV_PART_MAIN);
