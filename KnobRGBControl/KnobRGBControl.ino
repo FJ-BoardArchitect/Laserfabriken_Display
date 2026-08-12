@@ -40,7 +40,7 @@ SemaphoreHandle_t mutex;
 // value[0] = power (%, 0–100)
 // value[1] = laser wavelength (nm, 1540.00–1560.00)
 // float value[2] = {0.0f, 1550.0f};
-float value[3] = {0.0f, 30.0f, 25.0f};
+float value[4] = {0.0f, 30.0f, 25.0f, 0.0f}; // laser.power, crystal.wavelength, crystal.temp, crystal.output
 bool  laser_on  = false;
 
 float       step[2]   = {1.0f,   1.0f};
@@ -206,6 +206,8 @@ static void process_stm_line(const char *line)
         value[1] = fval;
     } else if (sscanf(line, "crystal.temp %f", &fval) == 1) {
         value[2] = fval;
+    } else if (sscanf(line, "crystal.output %f", &fval) == 1) {
+        value[3] = fval;
     } else if (strcmp(line, "laser on") == 0) {
         laser_on = true;
     } else if (strcmp(line, "laser off") == 0) {
