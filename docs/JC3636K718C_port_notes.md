@@ -87,19 +87,7 @@ The hardware pin definitions are kept correct — the reversal is purely logical
 
 ## Arduino IDE Settings
 
-These are the correct board settings for the JC3636K718C:
-
-| Setting | Value |
-|---|---|
-| Board | ESP32S3 Dev Module |
-| Flash Mode | QIO **120MHz** |
-| Flash Size | 16MB (128Mb) |
-| PSRAM | OPI PSRAM |
-| Partition Scheme | Huge APP (3MB No OTA/1MB SPIFFS) |
-| USB CDC On Boot | Enabled |
-| USB Mode | Hardware CDC and JTAG |
-| CPU Frequency | 240MHz (WiFi) |
-| Upload Speed | 921600 |
+See `Laserfabriken_Display/README.md` §2.2 ("Board-inställningar") for the board settings — that table is confirmed working on real hardware and is kept up to date there. (This section used to duplicate a shorter version of that table here; removed to avoid the two drifting out of sync.)
 
 The key difference from the Waveshare settings is **Flash Mode: QIO 120MHz** (Waveshare used 80MHz).
 

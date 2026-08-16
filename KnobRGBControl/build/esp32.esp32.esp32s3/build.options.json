@@ -1,0 +1,10 @@
+{
+  "additionalFiles": "../..,../..,../../..,../..,../..,../..,../..,../..,../..,../..,../..,../..,../..,../..,../..,../..,../..,../..,../..,../..",
+  "builtInLibrariesFolders": "/home/raytoningu/.arduino15/libraries",
+  "compiler.optimization_flags": "-Os",
+  "customBuildProperties": "",
+  "fqbn": "esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio120,FlashSize=16M,PartitionScheme=huge_app,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default",
+  "hardwareFolders": "/home/raytoningu/.arduino15/packages/esp32/hardware/esp32/3.3.8,/home/raytoningu/.arduino15/packages/esp32/hardware/esp32/3.3.8",
+  "otherLibrariesFolders": "/home/raytoningu/Arduino/libraries",
+  "sketchLocation": "/home/raytoningu/Board_Architect/Laserfabriken_Display/KnobRGBControl"
+}

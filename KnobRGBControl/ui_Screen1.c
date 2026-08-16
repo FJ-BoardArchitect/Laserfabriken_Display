@@ -33,7 +33,7 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_style_arc_width(ui_Arc1, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_arc_rounded(ui_Arc1, false, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-    lv_obj_set_style_arc_color(ui_Arc1, lv_color_hex(0xDD67E4), LV_PART_INDICATOR | LV_STATE_DEFAULT);
+    lv_obj_set_style_arc_color(ui_Arc1, lv_color_hex(0x2E86DE), LV_PART_INDICATOR | LV_STATE_DEFAULT); /* blue, not the original pink/magenta -- doubles as the UGN-mode set-temp indicator */
     lv_obj_set_style_arc_opa(ui_Arc1, 255, LV_PART_INDICATOR | LV_STATE_DEFAULT);
     lv_obj_set_style_arc_width(ui_Arc1, 4, LV_PART_INDICATOR | LV_STATE_DEFAULT);
     lv_obj_set_style_arc_rounded(ui_Arc1, false, LV_PART_INDICATOR | LV_STATE_DEFAULT);
@@ -124,7 +124,7 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_align(ui_Panel8, LV_ALIGN_CENTER);
     lv_obj_clear_flag(ui_Panel8, LV_OBJ_FLAG_SCROLLABLE);      /// Flags
     lv_obj_set_style_radius(ui_Panel8, 3, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(ui_Panel8, lv_color_hex(0x87AAD0), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(ui_Panel8, lv_color_hex(0xE8791A), LV_PART_MAIN | LV_STATE_DEFAULT); /* placeholder orange -- swap for the real brand hex */
     lv_obj_set_style_bg_opa(ui_Panel8, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_border_width(ui_Panel8, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
@@ -146,8 +146,8 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_x(ui_Label5, -76);
     lv_obj_set_y(ui_Label5, -125);
     lv_obj_set_align(ui_Label5, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_Label5, "FABRIKEN");
-    lv_obj_set_style_text_color(ui_Label5, lv_color_hex(0x0D222D), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(ui_Label5, "Quantum");
+    lv_obj_set_style_text_color(ui_Label5, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT); /* was near-black, relightened for contrast against the new orange panel */
     lv_obj_set_style_text_opa(ui_Label5, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_Label6 = lv_label_create(ui_Screen1);
@@ -156,8 +156,8 @@ void ui_Screen1_screen_init(void)
     lv_obj_set_x(ui_Label6, -63);
     lv_obj_set_y(ui_Label6, -142);
     lv_obj_set_align(ui_Label6, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_Label6, "LASER");
-    lv_obj_set_style_text_color(ui_Label6, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(ui_Label6, "SLF");
+    lv_obj_set_style_text_color(ui_Label6, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT); /* was black, relightened for contrast against the new orange panel */
     lv_obj_set_style_text_opa(ui_Label6, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     ui_Label7 = lv_label_create(ui_Screen1);
