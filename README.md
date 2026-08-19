@@ -62,7 +62,7 @@ Följande inställningar är bekräftat fungerande (verifierad flashning på rik
 
 Med bas-kortet (Guitions egna, med USB-C och strömbrytare): koppla in FPC-kabeln mellan displaymodulen och bas-kortet, slå på strömbrytaren, anslut USB-C, välj rätt port i Arduino IDE, tryck Upload.
 
-Det finns ingen väg att flasha displayen *via* UGN-kortets USB-port i nuläget — STM32-firmwaren har ingen transparent USB↔UART-brygga implementerad för det syftet.
+Går även att flasha *via* UGN-kortets egen USB-port, utan att öppna displaymodulen eller koppla in dess separata USB-C — STM32-firmwaren fungerar som en transparent USB↔UART-brygga till displayens ROM-bootloader för det syftet. Se `Laserfabriken_v1/Docs/esp32_display_firmware_update.md` för hela flödet (`Tools/display-updater/flash_display.py`).
 
 ---
 
@@ -70,25 +70,50 @@ Det finns ingen väg att flasha displayen *via* UGN-kortets USB-port i nuläget 
 
 Sketchen kör tre FreeRTOS-uppgifter:
 
-1. **`example_lvgl_port_task`** — LVGL:s renderingsloop. **All** LVGL-API-anrop måste ske härifrån (LVGL är inte trådsäkert). Läser även av UART-mottagning (`drain_stm_uart()`) och touch-input direkt i samma loop.
+1. **`lvgl_render_task`** — LVGL:s renderingsloop. **All** LVGL-API-anrop måste ske härifrån (LVGL är inte trådsäkert). Läser även av UART-mottagning (`drain_stm_uart()`) och touch-input direkt i samma loop.
 2. **`user_encoder_loop_task`** — hanterar rattens vänster/höger-events. Rör **aldrig** LVGL-objekt direkt (skriver bara till delade variabler, skyddade av `mutex`) — se kommentarerna kring `wake_screen()` för varför.
 3. LVGL:s egna interna uppgifter (touch-drivrutin m.m.)
 
-**Delat tillstånd** (`value[0]` = laser-effekt, `value[1]` = våglängd, `laser_on`, `v5_on`) skyddas av en gemensam `SemaphoreHandle_t mutex`. Rendering-loopen jämför varje varv mot föregående värden (`prev[]`) och uppdaterar bara de UI-element som faktiskt ändrats.
+**Delat tillstånd** skyddas av en gemensam `SemaphoreHandle_t mutex`:
+- `value[0]` = laser-effekt (SPUD), `value[1]` = våglängd (SPUD), `value[2]` = kristallens temperatur-börvärde, ratt-redigerbar (UGN) — samma `step[]`/`minVal[]`/`maxVal[]`-mekanism för alla tre.
+- `crystal_temp`, `crystal_output`, `crystal_tec_v` — skrivskyddad telemetri från STM32 (UGN), aldrig ratt-redigerbar.
+- `laser_on`, `crystal_tec_on` — de två knapparnas på/av-status (`ui_laserBtn` dubbelanvänds som TEC-knapp i UGN-läge; `ui_tecBtn`, det gamla 5V-namnet, är SPUD-only).
+- `g_ui_mode` — vilket lägets UI som visas just nu, se 3.2 nedan.
+
+Rendering-loopen jämför varje varv mot föregående värden (`prev[]`) och uppdaterar bara de UI-element som faktiskt ändrats.
 
 ### 3.1 Synk-protokoll mot STM32
 
 Samma enkla textprotokoll används i båda riktningarna, över `SerialSTM` (`HardwareSerial(0)` på GPIO43/44):
 
 ```
-set laser.power <0-100>
-set crystal.wavelength <nm, t.ex. 1550.00>
+set device.mode UGN | SPUD          (STM32 -> display, en gång per sekund, självläkande)
+set laser.power <0-100>             (båda riktningar, SPUD)
+set crystal.wavelength <nm>         (båda riktningar, SPUD)
+set crystal.setpoint <°C>           (båda riktningar, UGN — ratten skickar "set ...", STM32 ekar tillbaka utan "set")
+crystal.temp <°C>                   (STM32 -> display, UGN, skrivskyddad telemetri)
+crystal.output <-1.0..1.0>          (STM32 -> display, UGN, skrivskyddad telemetri)
+crystal.tec_voltage <V>             (STM32 -> display, UGN, uppskattad — se BSP_TEC_EstimateVoltage())
 laser on | laser off
 5v on | 5v off
+crystal.tec on | crystal.tec off
 ```
 
-- **Skickas till STM32** (`send_power()`, `send_wavelength()`, `send_laser_state()`, `send_5v_state()`): bara när användaren faktiskt ändrar något via ratten/knapparna, och bara den enskilda raden som ändrats — inte hela tillståndet varje gång (STM32:ns mottagningsbuffert är bara 1 byte djup, så mindre trafik = mindre risk för tappade tecken).
+- **Skickas till STM32** (`send_power()`, `send_wavelength()`, `send_crystal_setpoint()`, `send_laser_state()`, `send_crystal_tec_state()`): bara när användaren faktiskt ändrar något via ratten/knapparna, och bara den enskilda raden som ändrats — inte hela tillståndet varje gång (STM32:ns mottagningsbuffert är bara 1 byte djup, så mindre trafik = mindre risk för tappade tecken).
 - **Tas emot från STM32** (`drain_stm_uart()` → `process_stm_line()`): STM32 skickar samma format tillbaka vid uppstart (återställda sparade värden) och när något ändras på STM32-sidan — via USB-CLI, eller autonomt (t.ex. att lasertemperaturvakten stänger av lasern). Mottagna rader uppdaterar bara de delade variablerna — **skickar aldrig något tillbaka**, annars skulle synkningen studsa fram och tillbaka i all oändlighet.
+- `device.mode`, `laser.power`, `crystal.wavelength` och `crystal.setpoint` skickas periodiskt om (var ~1s) av STM32:n oavsett om värdet faktiskt ändrats — annars kan den allra första sändningen (som sker inom mikrosekunder av STM32:ns egen uppstart) hinna gå ut innan ESP32:ns långsammare bootkedja ens öppnat sin UART, och displayen skulle då aldrig få rätt startvärde förrän något faktiskt ändras igen. `crystal.temp`/`crystal.output`/`crystal.tec_voltage` har ingen sådan periodisk omsändning (mindre kritiskt, de ändras kontinuerligt under normal drift ändå), och inte heller knapparnas på/av-status (de har inget "fel" värde att fastna på — båda sidor startar redan på av/false).
+
+### 3.2 UGN/SPUD-lägen
+
+En delad display-binär visar olika UI beroende på vilket STM32-kort den är kopplad till, styrt av `set device.mode ...`-raden ovan (`g_ui_mode`, `apply_ui_mode()`). SPUD visar laser-effekt/våglängd-mätarna och en dedikerad 5V-knapp; UGN döljer allt laser-relaterat, återanvänder vänster-mätaren för kristalltemperatur (visare = uppmätt, ratt-redigerbar båge = börvärde) och lägger till textrader för temp/börvärde/TEC-spänning där högermätaren annars sitter. `ui_laserBtn` byter etikett/funktion till TEC på/av i UGN-läge istället för att lägga till en ny knapp.
+
+**Vid uppstart** visas ingenting förutom logotypen (`ui_Panel8`) tills både läge och minst ett riktigt värde faktiskt tagits emot från STM32:n (`hide_all_for_boot()`, `g_mode_known`/`g_values_known` i `lvgl_render_task()`) — annars hinner skärmen visa fel lägets layout (t.ex. SPUD) innan den riktiga synkningen hunnit fram.
+
+### 3.3 Statussida och inställningar
+
+Långt tryck på logotypen (`ui_Panel8`, `branding_long_press_cb`) öppnar en statusöverlägg (`show_status_overlay()`) med firmware-version, aktuellt läge och lägets aktuella värden. Tryck var som helst för att stänga.
+
+Inne i statusöverlägget finns en **Settings**-knapp (`show_settings_overlay()`) — för närvarande en enda inställning: hur länge skärmen väntar innan den dimmas medan laser/TEC är på (`dim_timeout_ms`, 2-30s, standard 5s). Vrid ratten för att justera, tryck var som helst för att spara (till ESP32:ns egen NVS via `Preferences`, oberoende av STM32:n) och stänga.
 
 ---
 

@@ -4,6 +4,12 @@
 #include "lcd_config.h"
 #include "ui.h"
 #include "bidi_switch_knob.h"
+#include <Preferences.h>
+
+/* Settings persisted on-device (NVS), independent of the STM32 -- purely a
+ * display-side behavior, so there's no protocol line and no risk to the
+ * STM32's own flash-saved calibration. */
+static Preferences displayPrefs;
 
 /* Hardware UART to STM32 -- GPIO43(U0TX)/GPIO44(U0RX), the board's default
  * UART0 pins. Confirmed via the JC3636K718 schematic that these aren't used
@@ -13,11 +19,9 @@
  * anything else. Separate from Serial (native USB CDC), so no conflict. */
 HardwareSerial SerialSTM(0);
 
-static const char *TAG = "encoder";
-
 static lv_obj_t * meter;
 lv_meter_indicator_t * needle;
-static lv_meter_scale_t * meter1_scale = NULL;  // stashed so lv_meter1_set_range() can re-range it per mode
+static lv_meter_scale_t * left_gauge_scale = NULL;  // stashed so set_left_gauge_range() can re-range it per mode
 
 static lv_obj_t * meter2;
 lv_meter_indicator_t * needle2;
@@ -34,10 +38,16 @@ static bool       crystal_tec_on = false;
 enum { MODE_UGN = 0, MODE_SPUD = 1 };
 static volatile uint8_t g_ui_mode = MODE_SPUD;
 
+/* Boot gate: everything except the branding panel stays hidden (see
+ * hide_all_for_boot()) until both of these go true, so the screen never
+ * flashes the wrong mode's layout before the STM32's sync catches up. */
+static volatile uint8_t g_mode_known   = 0;
+static volatile uint8_t g_values_known = 0;
+
 #define FW_VERSION "1.0.0"
 
-#define EXAMPLE_ENCODER_ECA_PIN    2
-#define EXAMPLE_ENCODER_ECB_PIN    1
+#define KNOB_ENCODER_A_PIN    2
+#define KNOB_ENCODER_B_PIN    1
 
 #define SET_BIT(reg,bit)   (reg |= ((uint32_t)0x01<<bit))
 #define CLEAR_BIT(reg,bit) (reg &= (~((uint32_t)0x01<<bit)))
@@ -80,19 +90,28 @@ static lv_obj_t  * ui_ctStepLabel = NULL;
 
 int chosen = 0;
 
-#define DIM_TIMEOUT_MS  5000
+#define DIM_TIMEOUT_MS_DEFAULT  5000u
+#define DIM_TIMEOUT_MIN_MS      2000u
+#define DIM_TIMEOUT_MAX_MS      30000u
+#define DIM_TIMEOUT_STEP_MS     1000u
 #define BRIGHT_DUTY     40
 #define DIM_DUTY        0
+
+// Adjustable from the settings overlay (long-press branding -> Settings),
+// loaded from NVS in setup(), saved back on settings-overlay close.
+static uint32_t dim_timeout_ms = DIM_TIMEOUT_MS_DEFAULT;
 
 static volatile uint32_t last_activity_ms = 0;
 static bool              screen_dimmed    = false;
 static lv_obj_t         *dim_overlay      = NULL;
 static lv_obj_t         *status_overlay   = NULL;
+static lv_obj_t         *settings_overlay = NULL;
+static lv_obj_t         *ui_dimTimeoutLabel = NULL;
 static lv_indev_t        *s_touch_indev   = NULL;
 
 // ── Meter init ────────────────────────────────────────────────────────────────
 
-void lv_example_meter_1(void)
+void create_left_gauge(void)
 {
     extern lv_obj_t *ui_Screen1;
     meter = lv_meter_create(ui_Screen1);
@@ -104,8 +123,8 @@ void lv_example_meter_1(void)
     lv_obj_set_style_border_width(meter, 0, LV_PART_MAIN);
 
     lv_meter_scale_t * scale = lv_meter_add_scale(meter);
-    meter1_scale = scale;  // stashed for lv_meter1_set_range() -- this meter is reused (not recreated) for UGN mode's temperature gauge
-    lv_meter_set_scale_range(meter, scale, 0, 100, 270, 135);
+    left_gauge_scale = scale;  // stashed for set_left_gauge_range() -- this meter is reused (not recreated) for UGN mode's temperature gauge
+    lv_meter_set_scale_range(meter, scale, (int32_t)minVal[0], (int32_t)maxVal[0], 270, 135);
     lv_meter_set_scale_ticks(meter, scale, 21, 3, 10, lv_palette_main(LV_PALETTE_GREY));
     lv_meter_set_scale_major_ticks(meter, scale, 5, 5, 15, lv_color_white(), 10);
     lv_obj_set_style_text_font(meter, &lv_font_montserrat_10, LV_PART_TICKS | LV_STATE_DEFAULT);
@@ -125,17 +144,17 @@ void lv_example_meter_1(void)
     lv_meter_set_indicator_end_value(meter, indic, 100);
 
     needle = lv_meter_add_needle_line(meter, scale, 4, lv_color_hex(0xFFFFFF), -10);
-    lv_obj_add_event_cb(meter, meter1_label_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(meter, left_gauge_label_cb, LV_EVENT_ALL, NULL);
 
-    lv_arc_set_range(ui_Arc1, 0, 100);
+    lv_arc_set_range(ui_Arc1, (int32_t)minVal[0], (int32_t)maxVal[0]);
 }
 
-/* UGN mode re-ranges meter's scale to min*10..max*10 (see lv_meter1_set_range()
+/* UGN mode re-ranges meter's scale to min*10..max*10 (see set_left_gauge_range()
  * below) so the widget's integer-only value API can represent one decimal
  * place, the same trick meter2 already uses for wavelength. Left unscaled,
  * the tick labels show the raw x10 values (e.g. "450" instead of "45").
  * SPUD mode's range (0-100) is never scaled, so its labels need no fixup. */
-static void meter1_label_cb(lv_event_t *e)
+static void left_gauge_label_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_DRAW_PART_BEGIN) return;
     lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(e);
@@ -152,13 +171,13 @@ static void meter1_label_cb(lv_event_t *e)
  * SPUD mode uses it for laser power (0-100), UGN mode repurposes the same
  * widget for temperature (15-45C) rather than creating a second gauge.
  * Called from apply_ui_mode(). */
-void lv_meter1_set_range(int32_t min, int32_t max)
+void set_left_gauge_range(int32_t min, int32_t max)
 {
-    lv_meter_set_scale_range(meter, meter1_scale, min, max, 270, 135);
+    lv_meter_set_scale_range(meter, left_gauge_scale, min, max, 270, 135);
     lv_arc_set_range(ui_Arc1, min, max);
 }
 
-void lv_example_meter_2(void)
+void create_wavelength_gauge(void)
 {
     extern lv_obj_t *ui_Screen1;
     meter2 = lv_meter_create(ui_Screen1);
@@ -170,7 +189,7 @@ void lv_example_meter_2(void)
     lv_obj_set_style_border_width(meter2, 0, LV_PART_MAIN);
 
     lv_meter_scale_t * scale = lv_meter_add_scale(meter2);
-    lv_meter_set_scale_range(meter2, scale, 15400, 15600, 270, 135);
+    lv_meter_set_scale_range(meter2, scale, (int32_t)(minVal[1] * 10.0f), (int32_t)(maxVal[1] * 10.0f), 270, 135);
     lv_meter_set_scale_ticks(meter2, scale, 41, 2, 8, lv_palette_main(LV_PALETTE_GREY));
     lv_meter_set_scale_major_ticks(meter2, scale, 10, 3, 11, lv_color_white(), 10);
     lv_obj_set_style_text_font(meter2, &lv_font_montserrat_10, LV_PART_TICKS | LV_STATE_DEFAULT);
@@ -178,10 +197,8 @@ void lv_example_meter_2(void)
 
     needle2 = lv_meter_add_needle_line(meter2, scale, 3, lv_color_hex(0xFFFFFF), -10);
 
-    lv_arc_set_range(ui_Arc2, 15400, 15600);
+    lv_arc_set_range(ui_Arc2, (int32_t)(minVal[1] * 10.0f), (int32_t)(maxVal[1] * 10.0f));
 }
-
-void lv_example_meter_3(void) {}  // removed
 
 static void meter2_label_cb(lv_event_t *e)
 {
@@ -270,20 +287,28 @@ static void process_stm_line(const char *line)
 
     if (sscanf(line, "set laser.power %d", &ival) == 1) {
         value[0] = (float)ival;
+        g_values_known = 1;
     } else if (sscanf(line, "set crystal.wavelength %f", &fval) == 1) {
         value[1] = fval;
+        g_values_known = 1;
     } else if (sscanf(line, "crystal.setpoint %f", &fval) == 1) {
         value[2] = fval;
+        g_values_known = 1;
     } else if (sscanf(line, "crystal.temp %f", &fval) == 1) {
         crystal_temp = fval;
+        g_values_known = 1;
     } else if (sscanf(line, "crystal.output %f", &fval) == 1) {
         crystal_output = fval;
+        g_values_known = 1;
     } else if (sscanf(line, "crystal.tec_voltage %f", &fval) == 1) {
         crystal_tec_v = fval;
+        g_values_known = 1;
     } else if (strcmp(line, "set device.mode UGN") == 0) {
         g_ui_mode = MODE_UGN;
+        g_mode_known = 1;
     } else if (strcmp(line, "set device.mode SPUD") == 0) {
         g_ui_mode = MODE_SPUD;
+        g_mode_known = 1;
     } else if (strcmp(line, "laser on") == 0) {
         laser_on = true;
     } else if (strcmp(line, "laser off") == 0) {
@@ -326,7 +351,7 @@ static void drain_stm_uart(void)
  * the button and an incoming sync line from the STM32 need to leave the
  * button's on-screen label/color matching `laser_on`/`crystal_tec_on`. Must
  * only be called from the LVGL task (this callback and
- * example_lvgl_port_task), never from user_encoder_loop_task -- see
+ * lvgl_render_task), never from user_encoder_loop_task -- see
  * wake_screen()'s comment on why LVGL calls don't belong on that task. */
 static void update_laser_button_ui(void)
 {
@@ -428,7 +453,7 @@ static lv_obj_t * ui_ugnTecVLabel     = NULL;
 
 /* Plain text, not gauges -- occupies the area meter2/ui_Arc2 vacate in UGN
  * mode. Created once, both modes, hidden by default; apply_ui_mode() toggles
- * visibility, example_lvgl_port_task() updates the text. */
+ * visibility, lvgl_render_task() updates the text. */
 void lv_create_ugn_text_labels(void)
 {
     extern lv_obj_t *ui_Screen1;
@@ -483,10 +508,17 @@ void lv_create_ugn_text_labels(void)
  * LV_OBJ_FLAG_HIDDEN), never creates/destroys widgets, so there's no
  * null-pointer risk regardless of which mode is active when this first
  * runs. Called once at the end of setup() and again whenever g_ui_mode
- * actually changes (see example_lvgl_port_task()). */
+ * actually changes (see lvgl_render_task()). */
 void apply_ui_mode(uint8_t mode)
 {
     bool ugn = (mode == MODE_UGN);
+
+    /* meter/ui_laserBtn are shared by both modes and were always visible
+     * before hide_all_for_boot() started hiding them at boot -- clear that
+     * here unconditionally so the first apply_ui_mode() call (boot reveal)
+     * actually shows them again. */
+    lv_obj_clear_flag(meter,       LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(ui_laserBtn, LV_OBJ_FLAG_HIDDEN);
 
     /* SPUD-only chrome around the left gauge -- the meter/needle/ui_Arc1
      * objects themselves are reused for UGN's temperature gauge, not hidden. */
@@ -517,12 +549,42 @@ void apply_ui_mode(uint8_t mode)
      * scaling matches meter2's existing convention for representing one
      * decimal place on LVGL's integer-only meter/arc value API. */
     if (ugn) {
-        lv_meter1_set_range((int32_t)(minVal[2] * 10.0f), (int32_t)(maxVal[2] * 10.0f));
+        set_left_gauge_range((int32_t)(minVal[2] * 10.0f), (int32_t)(maxVal[2] * 10.0f));
     } else {
-        lv_meter1_set_range(0, 100);
+        set_left_gauge_range((int32_t)minVal[0], (int32_t)maxVal[0]);
     }
 
     update_laser_button_ui();
+}
+
+/* Called once at boot, before the STM32 has told us the mode -- hides
+ * everything except the branding panel (ui_Panel8 and its labels, untouched
+ * here) so the screen doesn't flash SPUD's layout and then switch to UGN's
+ * a moment later. apply_ui_mode() only covers each mode's own chrome, not
+ * the widgets shared by both (meter/needle/ui_Arc1, ui_laserBtn), so those
+ * two need hiding here explicitly. Left via the g_mode_known/g_values_known
+ * gate in lvgl_render_task(), which calls apply_ui_mode() for real once
+ * both are set. */
+static void hide_all_for_boot(void)
+{
+    lv_obj_add_flag(meter,      LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_laserBtn, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(ui_power,   LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_Label2,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_Label13, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_lwStepLabel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_tecBtn,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(meter2,     LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_Arc2,    LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_power1,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_Label1,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_Label12, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(ui_ugnTempLabel,     LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_ugnSetpointLabel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_ugnTecVLabel,     LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_ctStepLabel,      LV_OBJ_FLAG_HIDDEN);
 }
 
 // ── Screen dim control ────────────────────────────────────────────────────────
@@ -556,9 +618,11 @@ static void status_overlay_click_cb(lv_event_t *e)
     hide_status_overlay();
 }
 
+static void settings_btn_event_cb(lv_event_t *e);
+
 static void show_status_overlay(void)
 {
-    if (status_overlay) return;  // already open
+    if (status_overlay || settings_overlay) return;  // already open
 
     extern lv_obj_t *ui_Screen1;
     status_overlay = lv_obj_create(ui_Screen1);
@@ -587,7 +651,19 @@ static void show_status_overlay(void)
     lv_label_set_text(lbl, buf);
     lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(lbl);
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, -30);
+
+    /* Separate clickable button, not covered by status_overlay_click_cb's
+     * dismiss-on-any-tap: lv_btn_create() widgets are clickable and don't
+     * bubble LV_EVENT_CLICKED up to their parent by default, so a tap here
+     * fires only settings_btn_event_cb, not the overlay's own dismiss. */
+    lv_obj_t *settingsBtn = lv_btn_create(status_overlay);
+    lv_obj_set_size(settingsBtn, 110, 38);
+    lv_obj_align(settingsBtn, LV_ALIGN_CENTER, 0, 70);
+    lv_obj_add_event_cb(settingsBtn, settings_btn_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *settingsLbl = lv_label_create(settingsBtn);
+    lv_label_set_text(settingsLbl, "Settings");
+    lv_obj_center(settingsLbl);
 
     last_activity_ms = millis();
 }
@@ -596,6 +672,80 @@ static void branding_long_press_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) == LV_EVENT_LONG_PRESSED) {
         show_status_overlay();
+    }
+}
+
+// ── Settings overlay ─────────────────────────────────────────────────────────
+// Reached via the "Settings" button inside the status overlay. Only one
+// setting for now (dim timeout) -- same "one editable thing, knob always
+// targets it" idiom as UGN mode's temperature setpoint, no select step
+// needed. Turning the knob adjusts the in-RAM value live; the label refresh
+// happens on lvgl_render_task (see its settings_overlay != NULL check),
+// never directly from the encoder task. Saved to NVS on close, not on every
+// tick, to avoid a flash write per detent.
+
+static void update_dim_timeout_label(void)
+{
+    if (!ui_dimTimeoutLabel) return;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Dim timeout: %lu s", (unsigned long)(dim_timeout_ms / 1000u));
+    lv_label_set_text(ui_dimTimeoutLabel, buf);
+}
+
+static void hide_settings_overlay(void)
+{
+    if (settings_overlay) {
+        displayPrefs.putUInt("dim_ms", dim_timeout_ms);
+        lv_obj_del(settings_overlay);
+        settings_overlay   = NULL;
+        ui_dimTimeoutLabel = NULL;
+    }
+}
+
+static void settings_overlay_click_cb(lv_event_t *e)
+{
+    last_activity_ms = millis();
+    hide_settings_overlay();
+}
+
+static void show_settings_overlay(void)
+{
+    if (settings_overlay) return;  // already open
+
+    extern lv_obj_t *ui_Screen1;
+    settings_overlay = lv_obj_create(ui_Screen1);
+    lv_obj_set_size(settings_overlay, LV_HOR_RES, LV_VER_RES);
+    lv_obj_center(settings_overlay);
+    lv_obj_clear_flag(settings_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(settings_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(settings_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(settings_overlay, 0, 0);
+    lv_obj_add_event_cb(settings_overlay, settings_overlay_click_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(settings_overlay);
+    lv_label_set_text(title, "Settings");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -40);
+
+    ui_dimTimeoutLabel = lv_label_create(settings_overlay);
+    lv_obj_set_style_text_color(ui_dimTimeoutLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(ui_dimTimeoutLabel, LV_ALIGN_CENTER, 0, 0);
+    update_dim_timeout_label();
+
+    lv_obj_t *hint = lv_label_create(settings_overlay);
+    lv_label_set_text(hint, "turn knob to adjust\ntap to save and exit");
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x808080), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(hint, LV_ALIGN_CENTER, 0, 50);
+
+    last_activity_ms = millis();
+}
+
+static void settings_btn_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        hide_status_overlay();
+        show_settings_overlay();
     }
 }
 
@@ -619,19 +769,24 @@ static void _knob_right_cb(void *arg, void *data)
 void setup()
 {
     mutex = xSemaphoreCreateMutex();
+    displayPrefs.begin("display", false);
+    dim_timeout_ms = displayPrefs.getUInt("dim_ms", DIM_TIMEOUT_MS_DEFAULT);
+    if (dim_timeout_ms < DIM_TIMEOUT_MIN_MS || dim_timeout_ms > DIM_TIMEOUT_MAX_MS) {
+        dim_timeout_ms = DIM_TIMEOUT_MS_DEFAULT;  // guard against corrupt/first-ever NVS read
+    }
     Serial.begin(115200);
     SerialSTM.begin(115200, SERIAL_8N1, 44, 43);  // RX=GPIO44(U0RX), TX=GPIO43(U0TX)
     Touch_Init();
     lcd_lvgl_Init();
     /* Stable handle to the touch device for polling its press state directly
-     * (see example_lvgl_port_task) -- lv_indev_drv_register()'s return value
+     * (see lvgl_render_task) -- lv_indev_drv_register()'s return value
      * is discarded in lcd_bsp.cpp, and lv_indev_get_act() only returns
      * non-NULL while LVGL is actively processing that device, not when
      * polled afterward from the render loop. Only one indev is registered
      * on this board (the touch panel), so the first one is it. */
     s_touch_indev = lv_indev_get_next(NULL);
-    lv_example_meter_1();
-    lv_example_meter_2();
+    create_left_gauge();
+    create_wavelength_gauge();
     lv_create_laser_wl_step_ui();
     lv_create_laser_button();
     lv_create_tec_button();
@@ -640,11 +795,10 @@ void setup()
     set_active_meter(chosen);
     lcd_bl_pwm_bsp_init(BRIGHT_DUTY);
 
-    /* Establishes a clean default-hidden state for the UGN-only widgets
-     * before any UART bytes arrive -- matches g_ui_mode's own MODE_SPUD
-     * default, so a display that hasn't heard a "set device.mode ..." line
-     * yet looks exactly like it always has. */
-    apply_ui_mode(g_ui_mode);
+    /* Nothing but branding shows until the STM32's mode+values actually
+     * arrive -- see hide_all_for_boot() and the g_mode_known/g_values_known
+     * gate in lvgl_render_task(). */
+    hide_all_for_boot();
 
     /* Long-press the branding panel to open the status overlay -- new
      * infrastructure, no long-press handling exists anywhere else on this
@@ -659,15 +813,15 @@ void setup()
 
     knob_even_ = xEventGroupCreate();
     knob_config_t cfg = {
-        .gpio_encoder_a = EXAMPLE_ENCODER_ECA_PIN,
-        .gpio_encoder_b = EXAMPLE_ENCODER_ECB_PIN,
+        .gpio_encoder_a = KNOB_ENCODER_A_PIN,
+        .gpio_encoder_b = KNOB_ENCODER_B_PIN,
     };
     s_knob = iot_knob_create(&cfg);
     iot_knob_register_cb(s_knob, KNOB_LEFT,  _knob_right_cb, NULL);
     iot_knob_register_cb(s_knob, KNOB_RIGHT, _knob_left_cb,  NULL);
 
     xTaskCreate(user_encoder_loop_task, "user_encoder_loop_task", 3000, NULL, 2, NULL);
-    xTaskCreate(example_lvgl_port_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
+    xTaskCreate(lvgl_render_task, "LVGL", EXAMPLE_LVGL_TASK_STACK_SIZE, NULL, EXAMPLE_LVGL_TASK_PRIORITY, NULL);
 }
 
 // ── Encoder task ──────────────────────────────────────────────────────────────
@@ -676,6 +830,24 @@ static void user_encoder_loop_task(void *arg)
 {
     for (;;) {
         EventBits_t even = xEventGroupWaitBits(knob_even_, BIT_EVEN_ALL, pdTRUE, pdFALSE, pdMS_TO_TICKS(5000));
+
+        if (settings_overlay != NULL) {
+            /* Settings overlay open -- knob adjusts dim_timeout_ms instead of
+             * power/wavelength/setpoint. Only the value changes here; the
+             * label refresh happens on lvgl_render_task (LVGL calls don't
+             * belong on this task, see wake_screen()'s comment). */
+            if (xSemaphoreTake(mutex, portMAX_DELAY)) {
+                if (READ_BIT(even, 0) && dim_timeout_ms > DIM_TIMEOUT_MIN_MS) {
+                    dim_timeout_ms -= DIM_TIMEOUT_STEP_MS;
+                }
+                if (READ_BIT(even, 1) && dim_timeout_ms < DIM_TIMEOUT_MAX_MS) {
+                    dim_timeout_ms += DIM_TIMEOUT_STEP_MS;
+                }
+                xSemaphoreGive(mutex);
+            }
+            last_activity_ms = millis();
+            continue;
+        }
 
         if (status_overlay != NULL) {
             /* Status overlay open -- don't silently change power/wavelength/
@@ -714,15 +886,17 @@ static void user_encoder_loop_task(void *arg)
 
 // ── LVGL render task ──────────────────────────────────────────────────────────
 
-static void example_lvgl_port_task(void *arg)
+static void lvgl_render_task(void *arg)
 {
-    float   prev[3]              = {-1.0f, -1.0f, -1.0f};
-    float   prev_crystal_temp    = -1000.0f;
-    float   prev_crystal_tec_v   = -1000.0f;
-    bool    lo                   = false;
-    bool    prev_laser_on        = false;
-    bool    prev_crystal_tec_on  = false;
-    uint8_t prev_ui_mode         = 0xFFu;  // impossible sentinel -- forces apply_ui_mode() on the first pass too
+    float    prev[3]              = {-1.0f, -1.0f, -1.0f};
+    float    prev_crystal_temp    = -1000.0f;
+    float    prev_crystal_tec_v   = -1000.0f;
+    bool     lo                   = false;
+    bool     prev_laser_on        = false;
+    bool     prev_crystal_tec_on  = false;
+    uint8_t  prev_ui_mode         = 0xFFu;  // impossible sentinel -- forces apply_ui_mode() on the first pass too
+    bool     boot_revealed        = false;
+    uint32_t prev_dim_timeout_ms  = 0xFFFFFFFFu;
 
     for (;;) {
         lv_timer_handler();
@@ -754,7 +928,13 @@ static void example_lvgl_port_task(void *arg)
 
             lo = laser_on;
 
-            if (g_ui_mode != prev_ui_mode) {
+            if (!boot_revealed) {
+                if (g_mode_known && g_values_known) {
+                    boot_revealed = true;
+                    prev_ui_mode  = g_ui_mode;
+                    apply_ui_mode(g_ui_mode);
+                }
+            } else if (g_ui_mode != prev_ui_mode) {
                 prev_ui_mode = g_ui_mode;
                 apply_ui_mode(g_ui_mode);
             }
@@ -817,11 +997,16 @@ static void example_lvgl_port_task(void *arg)
                 last_activity_ms = millis();
             }
 
+            if (settings_overlay != NULL && dim_timeout_ms != prev_dim_timeout_ms) {
+                prev_dim_timeout_ms = dim_timeout_ms;
+                update_dim_timeout_label();
+            }
+
             xSemaphoreGive(mutex);
         }
 
         uint32_t now = millis();
-        if (lo && !screen_dimmed && (now - last_activity_ms >= DIM_TIMEOUT_MS)) {
+        if (lo && !screen_dimmed && (now - last_activity_ms >= dim_timeout_ms)) {
             screen_dimmed = true;
             setUpdutySubdivide(DIM_DUTY);
             extern lv_obj_t *ui_Screen1;
@@ -835,7 +1020,7 @@ static void example_lvgl_port_task(void *arg)
         } else if (!lo && screen_dimmed) {
             /* Laser turned off while dimmed. */
             wake_screen();
-        } else if (screen_dimmed && (now - last_activity_ms < DIM_TIMEOUT_MS)) {
+        } else if (screen_dimmed && (now - last_activity_ms < dim_timeout_ms)) {
             /* Knob turns update last_activity_ms directly from
              * user_encoder_loop_task (a different FreeRTOS task) without
              * touching LVGL objects there -- calling lv_obj_del()/etc. from
