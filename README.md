@@ -38,7 +38,7 @@ Följande inställningar är bekräftat fungerande (verifierad flashning på rik
 | Inställning | Värde |
 |---|---|
 | Board | `ESP32S3 Dev Module` |
-| USB CDC On Boot | `Enabled` |
+| USB CDC On Boot | `Disabled` **(ändrat 2026-10-08, se nedan)** |
 | CPU Frequency | `240MHz (WiFi)` |
 | Core Debug Level | `None` |
 | USB DFU On Boot | `Disabled` |
@@ -53,10 +53,12 @@ Följande inställningar är bekräftat fungerande (verifierad flashning på rik
 | PSRAM | `OPI PSRAM` |
 | Upload Mode | `UART0 / Hardware CDC` |
 | Upload Speed | `921600` |
-| USB Mode | `Hardware CDC and JTAG` |
+| USB Mode | `USB-OTG (TinyUSB)` **(ändrat 2026-10-08, USB-host-länk till STM32)** |
 | Zigbee Mode | `Disabled` |
 
-**`USB CDC On Boot: Enabled` är kritiskt** — annars hamnar `Serial` (USB-debug) på samma fysiska UART0-pinnar som `SerialSTM` (kommunikationen till STM32) använder, och de två krockar. Se kommentaren högst upp i `KnobRGBControl.ino`.
+**Sedan 2026-10-08 (USB-host-länken, `stm_link.h`):** displayen är USB-*host* mot STM32 och kräver `USB Mode: USB-OTG (TinyUSB)` + `USB CDC On Boot: Disabled`. Med CDC On Boot aktiverat startar kärnan TinyUSB:s *device*-stack på samma PHY vid boot och host-läget kan inte startas. `Serial` blir då UART0 (GPIO43/44) och används bara för logg (`# link: ...`-rader), som STM32 på UGN vidarebefordrar till sin SWD-konsol. Kräver ESP32-kärna **3.3.12 eller nyare** (USBHost-biblioteket). Flashning: håll BOOT vid uppstart och koppla displayens USB-C till PC:n — auto-reset via 1200 bps fungerar inte i host-läge. Stycket nedan beskriver det gamla UART-upplägget.
+
+**(Gammalt, före 2026-10-08:) `USB CDC On Boot: Enabled` är kritiskt** — annars hamnar `Serial` (USB-debug) på samma fysiska UART0-pinnar som `SerialSTM` (kommunikationen till STM32) använder, och de två krockar. Se kommentaren högst upp i `KnobRGBControl.ino`.
 
 ### 2.3 Flashning
 

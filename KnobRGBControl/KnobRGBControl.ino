@@ -5,19 +5,16 @@
 #include "ui.h"
 #include "bidi_switch_knob.h"
 #include <Preferences.h>
+#include "stm_link.h"
 
 /* Settings persisted on-device (NVS), independent of the STM32 -- purely a
  * display-side behavior, so there's no protocol line and no risk to the
  * STM32's own flash-saved calibration. */
 static Preferences displayPrefs;
 
-/* Hardware UART to STM32 -- GPIO43(U0TX)/GPIO44(U0RX), the board's default
- * UART0 pins. Confirmed via the JC3636K718 schematic that these aren't used
- * by any other peripheral on this board (LCD/touch/knob/audio/mic/battery
- * ADC/SD/RGB all use other pins, USB is native on GPIO19/20) -- they're
- * broken out to the inter-board FPC connector on their own, unclaimed by
- * anything else. Separate from Serial (native USB CDC), so no conflict. */
-HardwareSerial SerialSTM(0);
+/* Link to the STM32: USB, this display being the host (stm_link.h). The
+ * old UART0 (GPIO43/44) link is gone; on UGN those pins still reach the
+ * STM32 and now carry Serial's '#'-prefixed log lines instead. */
 
 static lv_obj_t * meter;
 lv_meter_indicator_t * needle;
@@ -236,17 +233,17 @@ void lv_create_laser_wl_step_ui(void)
  * receive buffer can keep up with. */
 static void send_power(void)
 {
-    SerialSTM.printf("set laser.power %d\r\n", (int)value[0]);
+    stm_link_printf("set laser.power %d\r\n", (int)value[0]);
 }
 
 static void send_wavelength(void)
 {
-    SerialSTM.printf("set crystal.wavelength %.2f\r\n", value[1]);
+    stm_link_printf("set crystal.wavelength %.2f\r\n", value[1]);
 }
 
 static void send_crystal_setpoint(void)
 {
-    SerialSTM.printf("set crystal.setpoint %.4f\r\n", value[2]);
+    stm_link_printf("set crystal.setpoint %.4f\r\n", value[2]);
 }
 
 static void send_laser_state(void)
@@ -257,15 +254,15 @@ static void send_laser_state(void)
      * happens to also currently respond to as a side effect of a separate,
      * unrelated firmware quirk on the STM32 side, not something to rely on. */
     if (g_ui_mode == MODE_UGN) {
-        SerialSTM.print(laser_on ? "crystal.tec on\r\n" : "crystal.tec off\r\n");
+        stm_link_write(laser_on ? "crystal.tec on\r\n" : "crystal.tec off\r\n");
     } else {
-        SerialSTM.print(laser_on ? "laser on\r\n" : "laser off\r\n");
+        stm_link_write(laser_on ? "laser on\r\n" : "laser off\r\n");
     }
 }
 
 static void send_crystal_tec_state(void)
 {
-    SerialSTM.print(crystal_tec_on ? "crystal.tec on\r\n" : "crystal.tec off\r\n");
+    stm_link_write(crystal_tec_on ? "crystal.tec on\r\n" : "crystal.tec off\r\n");
 }
 
 // ── Receiving state pushed from the STM32 ───────────────────────────────────
@@ -285,7 +282,13 @@ static void process_stm_line(const char *line)
     int   ival;
     float fval;
 
-    if (sscanf(line, "set laser.power %d", &ival) == 1) {
+    char hello_mode[8];
+    if (sscanf(line, "hello %7s fw=", hello_mode) == 1) {
+        /* STM32's answer to our hello (stm_link.cpp): board type decides
+         * the UI, same as the older "set device.mode" line still does. */
+        if (strcmp(hello_mode, "UGN") == 0)       { g_ui_mode = MODE_UGN;  g_mode_known = 1; }
+        else if (strcmp(hello_mode, "SPUD") == 0) { g_ui_mode = MODE_SPUD; g_mode_known = 1; }
+    } else if (sscanf(line, "set laser.power %d", &ival) == 1) {
         value[0] = (float)ival;
         g_values_known = 1;
     } else if (sscanf(line, "set crystal.wavelength %f", &fval) == 1) {
@@ -325,16 +328,16 @@ static void process_stm_line(const char *line)
      * the lines this function understands. */
 }
 
-/* Drains whatever SerialSTM has buffered and feeds complete lines to
- * process_stm_line(). Never writes back to SerialSTM -- state received
+/* Drains whatever the STM32 link has buffered and feeds complete lines to
+ * process_stm_line(). Never writes back -- state received
  * here must not be echoed, or every sync would bounce back and forth. */
 static void drain_stm_uart(void)
 {
     static char    buf[48];
     static uint8_t pos = 0;
 
-    while (SerialSTM.available()) {
-        char c = (char)SerialSTM.read();
+    while (stm_link_available()) {
+        char c = (char)stm_link_read();
         if (c == '\r' || c == '\n') {
             if (pos > 0) {
                 buf[pos] = '\0';
@@ -774,8 +777,8 @@ void setup()
     if (dim_timeout_ms < DIM_TIMEOUT_MIN_MS || dim_timeout_ms > DIM_TIMEOUT_MAX_MS) {
         dim_timeout_ms = DIM_TIMEOUT_MS_DEFAULT;  // guard against corrupt/first-ever NVS read
     }
-    Serial.begin(115200);
-    SerialSTM.begin(115200, SERIAL_8N1, 44, 43);  // RX=GPIO44(U0RX), TX=GPIO43(U0TX)
+    Serial.begin(115200);   // UART0 (USB CDC On Boot must be Disabled) -- log only, see stm_link.h
+    stm_link_begin(FW_VERSION);
     Touch_Init();
     lcd_lvgl_Init();
     /* Stable handle to the touch device for polling its press state directly
@@ -1097,4 +1100,8 @@ void set_active_meter(int index)
     }
 }
 
-void loop() {}
+void loop()
+{
+    stm_link_task();   /* USB host housekeeping + mount/hello state machine */
+    delay(1);
+}
