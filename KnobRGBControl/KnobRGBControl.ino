@@ -72,6 +72,7 @@ const float maxVal[3] = {100.0f, 1560.0f, 45.0f};
 static float crystal_temp   = 0.0f;  // measured, drives the needle
 static float crystal_output = 0.0f;  // PID output, -1.0..1.0 (not currently rendered, kept for parity/future use)
 static float crystal_tec_v  = 0.0f;  // commanded (not measured) buck voltage
+static float stm_setpoint   = 0.0f;  // last "crystal.setpoint" line from the STM32 (shown in the STM32 box)
 
 static int         lw_step_idx = 0; // 0=1, 1=0.1, 2=0.01
 static const float lw_steps[]  = {1.0f, 0.1f, 0.01f};
@@ -296,6 +297,7 @@ static void process_stm_line(const char *line)
         g_values_known = 1;
     } else if (sscanf(line, "crystal.setpoint %f", &fval) == 1) {
         value[2] = fval;
+        stm_setpoint = fval;
         g_values_known = 1;
     } else if (sscanf(line, "crystal.temp %f", &fval) == 1) {
         crystal_temp = fval;
@@ -454,6 +456,12 @@ static lv_obj_t * ui_ugnTempLabel     = NULL;
 static lv_obj_t * ui_ugnSetpointLabel = NULL;
 static lv_obj_t * ui_ugnTecVLabel     = NULL;
 
+/* "STM32" box (UGN mode): everything in it comes from lines the STM32 sent,
+ * nothing from local knob state -- so if the setpoint shown here matches
+ * the one on the gauge, the round trip over the link works. */
+static lv_obj_t * ui_stmBox           = NULL;
+static lv_obj_t * ui_stmSetpointLabel = NULL;
+
 /* Plain text, not gauges -- occupies the area meter2/ui_Arc2 vacate in UGN
  * mode. Created once, both modes, hidden by default; apply_ui_mode() toggles
  * visibility, lvgl_render_task() updates the text. */
@@ -461,15 +469,40 @@ void lv_create_ugn_text_labels(void)
 {
     extern lv_obj_t *ui_Screen1;
 
-    ui_ugnTempLabel = lv_label_create(ui_Screen1);
-    lv_obj_set_width(ui_ugnTempLabel, LV_SIZE_CONTENT);
-    lv_obj_set_height(ui_ugnTempLabel, LV_SIZE_CONTENT);
-    lv_obj_set_pos(ui_ugnTempLabel, 94, -15);
-    lv_obj_set_align(ui_ugnTempLabel, LV_ALIGN_CENTER);
+    /* Bordered box on the right of the gauge holding the STM32-reported
+     * values as a column: title, temperature, setpoint, TEC voltage. Sized
+     * to stay inside the round panel at that offset (right edge ~155 px
+     * from centre at y <= 62 px). */
+    ui_stmBox = lv_obj_create(ui_Screen1);
+    lv_obj_set_size(ui_stmBox, 130, 84);
+    lv_obj_set_pos(ui_stmBox, 90, 20);
+    lv_obj_set_align(ui_stmBox, LV_ALIGN_CENTER);
+    lv_obj_clear_flag(ui_stmBox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(ui_stmBox, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(ui_stmBox, LV_OPA_40, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(ui_stmBox, lv_color_hex(0x808080), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(ui_stmBox, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(ui_stmBox, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(ui_stmBox, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_row(ui_stmBox, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_flex_flow(ui_stmBox, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(ui_stmBox, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(ui_stmBox, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t * stmTitle = lv_label_create(ui_stmBox);
+    lv_label_set_text(stmTitle, "STM32");
+    lv_obj_set_style_text_color(stmTitle, lv_color_hex(0x808080), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(stmTitle, &lv_font_montserrat_10, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    ui_ugnTempLabel = lv_label_create(ui_stmBox);
     lv_label_set_text(ui_ugnTempLabel, "Temp: -- C");
     lv_obj_set_style_text_color(ui_ugnTempLabel, lv_color_hex(0xD8D5D5), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_ugnTempLabel, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_add_flag(ui_ugnTempLabel, LV_OBJ_FLAG_HIDDEN);
+
+    ui_stmSetpointLabel = lv_label_create(ui_stmBox);
+    lv_label_set_text(ui_stmSetpointLabel, "SP: -- C");
+    lv_obj_set_style_text_color(ui_stmSetpointLabel, lv_color_hex(0xD8D5D5), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_stmSetpointLabel, &lv_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     /* Positioned at meter's own bottom (same offset ui_power uses for SPUD's
      * power readout, -71,57 -- meter is reused, not recreated, for UGN's
@@ -495,15 +528,10 @@ void lv_create_ugn_text_labels(void)
     lv_obj_set_style_text_font(ui_ctStepLabel, &lv_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_add_flag(ui_ctStepLabel, LV_OBJ_FLAG_HIDDEN);
 
-    ui_ugnTecVLabel = lv_label_create(ui_Screen1);
-    lv_obj_set_width(ui_ugnTecVLabel, LV_SIZE_CONTENT);
-    lv_obj_set_height(ui_ugnTecVLabel, LV_SIZE_CONTENT);
-    lv_obj_set_pos(ui_ugnTecVLabel, 94, 45);
-    lv_obj_set_align(ui_ugnTecVLabel, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_ugnTecVLabel, "TEC V: -- (commanded)");
+    ui_ugnTecVLabel = lv_label_create(ui_stmBox);
+    lv_label_set_text(ui_ugnTecVLabel, "TEC V: --");
     lv_obj_set_style_text_color(ui_ugnTecVLabel, lv_color_hex(0x808080), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_ugnTecVLabel, &lv_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_add_flag(ui_ugnTecVLabel, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* Switches the on-screen widgets between SPUD's laser-oriented layout and
@@ -543,9 +571,8 @@ void apply_ui_mode(uint8_t mode)
     /* UGN-only text readout, in the area the right gauge just vacated
      * (ui_ugnSetpointLabel itself now sits on meter's own face, see
      * lv_create_ugn_text_labels(), but is still UGN-only chrome). */
-    if (ugn) lv_obj_clear_flag(ui_ugnTempLabel, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(ui_ugnTempLabel, LV_OBJ_FLAG_HIDDEN);
+    if (ugn) lv_obj_clear_flag(ui_stmBox, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(ui_stmBox, LV_OBJ_FLAG_HIDDEN);
     if (ugn) lv_obj_clear_flag(ui_ugnSetpointLabel, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(ui_ugnSetpointLabel, LV_OBJ_FLAG_HIDDEN);
-    if (ugn) lv_obj_clear_flag(ui_ugnTecVLabel, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(ui_ugnTecVLabel, LV_OBJ_FLAG_HIDDEN);
     if (ugn) lv_obj_clear_flag(ui_ctStepLabel, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(ui_ctStepLabel, LV_OBJ_FLAG_HIDDEN);
 
     /* Left gauge range: temperature (UGN) vs laser power (SPUD). The x10
@@ -584,9 +611,8 @@ static void hide_all_for_boot(void)
     lv_obj_add_flag(ui_Label1,  LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui_Label12, LV_OBJ_FLAG_HIDDEN);
 
-    lv_obj_add_flag(ui_ugnTempLabel,     LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_stmBox,           LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui_ugnSetpointLabel, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(ui_ugnTecVLabel,     LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(ui_ctStepLabel,      LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -893,6 +919,7 @@ static void lvgl_render_task(void *arg)
 {
     float    prev[3]              = {-1.0f, -1.0f, -1.0f};
     float    prev_crystal_temp    = -1000.0f;
+    float    prev_stm_setpoint    = -1000.0f;
     float    prev_crystal_tec_v   = -1000.0f;
     bool     lo                   = false;
     bool     prev_laser_on        = false;
@@ -967,6 +994,11 @@ static void lvgl_render_task(void *arg)
                  * has its own readout (ui_ugnTempLabel), just not tied to the
                  * needle. Same x10 integer-scale convention as meter2's
                  * wavelength handling above. */
+                if (stm_setpoint != prev_stm_setpoint) {
+                    prev_stm_setpoint = stm_setpoint;
+                    snprintf(buf, sizeof(buf), "SP: %.2f C", stm_setpoint);
+                    lv_label_set_text(ui_stmSetpointLabel, buf);
+                }
                 if (crystal_temp != prev_crystal_temp) {
                     prev_crystal_temp = crystal_temp;
                     snprintf(buf, sizeof(buf), "Temp: %.2f C", crystal_temp);
