@@ -66,6 +66,19 @@ Med bas-kortet (Guitions egna, med USB-C och strömbrytare): koppla in FPC-kabel
 
 Går även att flasha *via* UGN-kortets egen USB-port, utan att öppna displaymodulen eller koppla in dess separata USB-C — STM32-firmwaren fungerar som en transparent USB↔UART-brygga till displayens ROM-bootloader för det syftet. Se `Laserfabriken_v1/Docs/esp32_display_firmware_update.md` för hela flödet (`Tools/display-updater/flash_display.py`).
 
+### 2.4 Demobygge utan STM32-kort (`STM_LINK_FAKE`)
+
+`KnobRGBControl/stm_link_fake.cpp` är en simulerad STM32 bakom samma `stm_link`-API: den svarar på hello, skickar hela tillståndet, ger auktoritativa svar på varje `set` (klampar `laser.power` till 0–100), strömmar kristalltemperatur/utsignal/TEC-spänning med 5 Hz och ändrar `laser.power` var 20:e sekund som om någon skrivit i STM32:s CLI. Radformaten är kopierade från `send_state()`/`confirm()` i `cli.c`. **Testar bara parsern och UI:t, inte USB-länken** — USB-host-stacken startas inte alls i det här bygget.
+
+Byggs genom att definiera `STM_LINK_FAKE` (då kompileras `stm_link.cpp` bort). Med arduino-cli, samma FQBN som vanligt plus:
+
+```
+--build-property "compiler.cpp.extra_flags=-DSTM_LINK_FAKE"                               # SPUD-skärmen
+--build-property "compiler.cpp.extra_flags=-DSTM_LINK_FAKE -DSTM_LINK_FAKE_MODE=\"UGN\""   # UGN-skärmen
+```
+
+I Arduino IDE: lägg `#define STM_LINK_FAKE` överst i både `stm_link.cpp` och `stm_link_fake.cpp` (och ta bort det igen). Statussidan visar `up (FAKE)` i det här läget. Displayen syns inte på PC:n när demobygget kör (varken host- eller device-stack), så omflashning kräver BOOT vid uppstart precis som för host-bygget.
+
 ---
 
 ## 3. Arkitektur

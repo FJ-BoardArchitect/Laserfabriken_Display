@@ -1,3 +1,7 @@
+/* Compiled out when the sketch is built with -DSTM_LINK_FAKE: stm_link_fake.cpp
+ * then provides the same API with a simulated STM32 (bench demo without a
+ * board). See the comment at the top of that file. */
+#ifndef STM_LINK_FAKE
 #include "stm_link.h"
 #include <Arduino.h>
 #include <USBHost.h>
@@ -122,3 +126,5 @@ int stm_link_read()
 {
     return stm_link_connected() ? s_serial.read() : -1;
 }
+
+#endif /* !STM_LINK_FAKE */
