@@ -1,0 +1,10 @@
+# Tools/flash_display.py -- Python requirements
+#
+# No pip packages: only the standard library is used.
+#
+# Needed outside pip:
+#   python3 >= 3.8
+#   arduino-cli, or Arduino IDE (its bundled arduino-cli is found automatically
+#   under /opt/arduino-ide or /usr/lib/arduino-ide)
+#   ESP32 board package (esp32:esp32) >= 3.3.12 with the libraries in README 2.1
+#   a USB-C cable to the display; BOOT held while plugging in (host-mode firmware)

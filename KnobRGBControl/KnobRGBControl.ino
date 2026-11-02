@@ -859,6 +859,13 @@ static void user_encoder_loop_task(void *arg)
 {
     for (;;) {
         EventBits_t even = xEventGroupWaitBits(knob_even_, BIT_EVEN_ALL, pdTRUE, pdFALSE, pdMS_TO_TICKS(5000));
+#ifdef KNOB_DEBUG
+        /* Bench diagnostics: report the raw encoder state over the STM32
+         * link as '#' comment lines (the STM32 ignores them, and in a Debug
+         * build mirrors them to its SWD console). Build with -DKNOB_DEBUG. */
+        stm_link_printf("# knob ev=%u a=%d b=%d handle=%d\r\n", (unsigned)even,
+                        digitalRead(KNOB_ENCODER_A_PIN), digitalRead(KNOB_ENCODER_B_PIN), s_knob != NULL);
+#endif
 
         if (settings_overlay != NULL) {
             /* Settings overlay open -- knob adjusts dim_timeout_ms instead of

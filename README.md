@@ -62,6 +62,31 @@ Följande inställningar är bekräftat fungerande (verifierad flashning på rik
 
 ### 2.3 Flashning
 
+**Enklast: `Tools/flash_display.py`.** Scriptet frågar vilken firmware som ska byggas:
+
+1. **usbc** — för **SPUD**: displayen är USB-host på SPUD:s USB-C. Bygger arbetskatalogen (gren `usb-c-Test`)
+   med USB Mode "USB-OTG (TinyUSB)" och CDC On Boot "Disabled".
+2. **uart** — för **UGN**: UART0 över FPC:n till UGN:s M8-kontakt. Bygger gren `main`
+   (exporteras med `git archive`, arbetskatalogen rörs inte) med USB Mode
+   "Hardware CDC and JTAG" och CDC On Boot "Enabled".
+
+Därefter bygger det via arduino-cli (Arduino IDE:s inbyggda hittas automatiskt), väntar
+på att displayen sätts i bootloadern och flashar. Inga pip-paket, se `Tools/requirements.txt`.
+
+```bash
+python3 Tools/flash_display.py                   # meny, bygg, flasha
+python3 Tools/flash_display.py --variant usbc    # utan meny (usbc | uart | demo)
+python3 Tools/flash_display.py --variant uart --ref dev_fj   # UART-varianten från annan gren
+python3 Tools/flash_display.py --build-only      # bara bygga (Tools/build/<variant>/)
+python3 Tools/flash_display.py --variant demo    # simulerad STM32 (avsnitt 2.4), inte i menyn
+python3 Tools/flash_display.py --knob-debug      # med encoder-diagnostik över länken
+```
+
+Kom ihåg att USB-host-firmwaren aldrig syns på datorn: håll **BOOT** nedtryckt när displayen
+får ström, scriptet säger till när. UART-firmwaren syns på datorn när den kör, så där
+behövs BOOT bara om displayen kommer från ett host-bygge. Den gamla `KnobRGBControl/build/`-mappen i repot är
+ett UART-bygge från 2026-10-06 och ska inte användas.
+
 Med bas-kortet (Guitions egna, med USB-C och strömbrytare): koppla in FPC-kabeln mellan displaymodulen och bas-kortet, slå på strömbrytaren, anslut USB-C, välj rätt port i Arduino IDE, tryck Upload.
 
 Går även att flasha *via* UGN-kortets egen USB-port, utan att öppna displaymodulen eller koppla in dess separata USB-C — STM32-firmwaren fungerar som en transparent USB↔UART-brygga till displayens ROM-bootloader för det syftet. Se `Laserfabriken_v1/Docs/esp32_display_firmware_update.md` för hela flödet (`Tools/display-updater/flash_display.py`).
