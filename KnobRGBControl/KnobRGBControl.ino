@@ -319,11 +319,11 @@ static void process_stm_line(const char *line)
     } else if (strcmp(line, "laser off") == 0) {
         laser_on = false;
     } else if (strcmp(line, "crystal.tec on") == 0) {
-        laser_on = true;       // UGN-mode button state -- see send_laser_state()/update_laser_button_ui()
         crystal_tec_on = true; // SPUD-mode button state -- see send_crystal_tec_state()/update_tec_button_ui()
+        if (g_ui_mode == MODE_UGN) laser_on = true;   // UGN: the laser button IS the TEC button
     } else if (strcmp(line, "crystal.tec off") == 0) {
-        laser_on = false;
         crystal_tec_on = false;
+        if (g_ui_mode == MODE_UGN) laser_on = false;
     }
     /* anything else (e.g. the STM32's own "OK ..."/"ERR ..." replies to
      * whatever this screen just sent) is silently ignored -- not one of
