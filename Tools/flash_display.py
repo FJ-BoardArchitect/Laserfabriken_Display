@@ -30,7 +30,7 @@ gets power, then release. The script waits for that.
 Requirements: python3, arduino-cli (or Arduino IDE), ESP32 core 3.3.12+ with
 the libraries listed in README 2.1. No pip packages.
 """
-import argparse, glob, os, shutil, subprocess, sys, time
+import argparse, glob, os, re, shutil, subprocess, sys, time
 
 HERE   = os.path.dirname(os.path.abspath(__file__))
 ROOT   = os.path.abspath(os.path.join(HERE, ".."))
@@ -55,22 +55,38 @@ VARIANTS = {
              "fqbn": FQBN_OTG,   "flags": ["-DSTM_LINK_FAKE"], "ref": None,   "menu": False},
 }
 
+# The arduino-cli bundled with Arduino IDE 2 comes first: a separately installed
+# arduino-cli (apt, brew, winget ...) can have its own data directory, and then
+# it does not see the cores and libraries installed through the IDE.
+_LOCAL = os.environ.get("LOCALAPPDATA", "")
+_IDE_CLI = "resources/app/lib/backend/resources/arduino-cli"
 ARDUINO_CLI_CANDIDATES = [
-    "arduino-cli",
-    "/opt/arduino-ide/resources/app/lib/backend/resources/arduino-cli",
-    "/usr/lib/arduino-ide/resources/app/lib/backend/resources/arduino-cli",
+    "/opt/arduino-ide/" + _IDE_CLI,                                         # Linux (Arch, .deb)
+    "/usr/lib/arduino-ide/" + _IDE_CLI,
+    os.path.expanduser("~/arduino-ide/" + _IDE_CLI),                        # Linux, unpacked zip/AppImage
+    "/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli",  # macOS
+    os.path.join(_LOCAL, "Programs", "Arduino IDE", *_IDE_CLI.split("/")) + ".exe",            # Windows, per user
+    os.path.join("C:\\Program Files", "Arduino IDE", *_IDE_CLI.split("/")) + ".exe",            # Windows, all users
+    "arduino-cli",                                                          # PATH
     os.path.expanduser("~/.local/bin/arduino-cli"),
 ]
+# Arduino IDE 2 runs its arduino-cli with this config file (data and sketchbook
+# directories, board manager URLs). Without it the CLI falls back to defaults,
+# which is the usual reason it says a core is missing that the IDE has.
+IDE_CONFIG = os.path.expanduser(os.path.join("~", ".arduinoIDE", "arduino-cli.yaml"))
 
-def find_arduino_cli(explicit):
+def find_arduino_cli(explicit, config):
+    """Return the arduino-cli command as an argv prefix (path + --config-file)."""
     for c in ([explicit] if explicit else []) + ARDUINO_CLI_CANDIDATES:
         path = shutil.which(c) or (c if os.path.isfile(c) and os.access(c, os.X_OK) else None)
         if path:
-            return path
+            cfg = config if config is not None else (IDE_CONFIG if os.path.isfile(IDE_CONFIG) else "")
+            return [path] + (["--config-file", cfg] if cfg else [])
     sys.exit("arduino-cli hittades inte. Installera Arduino IDE eller arduino-cli, eller ange --arduino-cli <sökväg>.")
 
 def check_core(cli):
-    out = subprocess.run([cli, "core", "list"], capture_output=True, text=True).stdout
+    p = subprocess.run(cli + ["core", "list"], capture_output=True, text=True)
+    out = p.stdout
     for line in out.splitlines():
         if line.startswith("esp32:esp32"):
             ver = line.split()[1]
@@ -78,7 +94,16 @@ def check_core(cli):
             if (major, minor, patch) < (3, 3, 12):
                 sys.exit(f"ESP32-kärna {ver} är för gammal: host-länken kräver 3.3.12 eller nyare (USBHost-biblioteket).")
             return ver
-    sys.exit("ESP32-kärnan (esp32:esp32) är inte installerad i arduino-cli / Arduino IDE.")
+    cores = [l for l in out.splitlines() if re.match(r"\w[\w-]*:\w", l)]   # rows, not progress output
+    cfg = subprocess.run(cli + ["config", "get", "directories.data"], capture_output=True, text=True).stdout.strip()
+    msg = [f"ESP32-kärnan (esp32:esp32) syns inte för {' '.join(cli)}",
+           f"  den letar i: {cfg or '(okänt)'}",
+           "  installerade kärnor enligt den:", *("    " + l for l in cores or ["(inga)"])]
+    if "arduino:esp32" in out:
+        msg.append("  'arduino:esp32' är Arduinos kärna för Nano ESP32, inte rätt. Installera 'esp32 by Espressif Systems' i Boards Manager.")
+    msg += ["  Är kärnan installerad i Arduino IDE men syns inte här, använder scriptet en annan arduino-cli eller",
+            "  datakatalog än IDE:n. Ange IDE:ns med --arduino-cli <sökväg> och/eller --config <arduino-cli.yaml>."]
+    sys.exit("\n".join(msg))
 
 def choose_variant():
     print("Vilken firmware ska byggas?")
@@ -118,7 +143,7 @@ def build(cli, variant, knob_debug, ref_override=None):
     flags = list(v["flags"]) + (["-DKNOB_DEBUG"] if knob_debug else [])
     if knob_debug and ref:
         print("  obs: --knob-debug har ingen effekt i UART-varianten (finns bara i usb-c-Test)")
-    cmd = [cli, "compile", "--fqbn", v["fqbn"], "--build-path", out_dir, "--warnings", "none"]
+    cmd = cli + ["compile", "--fqbn", v["fqbn"], "--build-path", out_dir, "--warnings", "none"]
     if flags:
         cmd += ["--build-property", "compiler.cpp.extra_flags=" + " ".join(flags)]
     cmd.append(sketch)
@@ -140,7 +165,8 @@ def build(cli, variant, knob_debug, ref_override=None):
     return out_dir
 
 def find_display_port():
-    for p in glob.glob("/dev/serial/by-id/*Espressif*"):
+    """Linux: by-id name. macOS: usbmodem tty. Windows: give --port COMx."""
+    for p in glob.glob("/dev/serial/by-id/*Espressif*") + sorted(glob.glob("/dev/cu.usbmodem*")):
         return os.path.realpath(p)
     return None
 
@@ -167,7 +193,7 @@ def wait_for_bootloader(timeout_s):
     sys.exit("displayen dök aldrig upp. Var BOOT nedtryckt i det ögonblick kabeln sattes i?")
 
 def flash(cli, variant, out_dir, port):
-    cmd = [cli, "upload", "--fqbn", VARIANTS[variant]["fqbn"], "--input-dir", out_dir, "-p", port, SKETCH]
+    cmd = cli + ["upload", "--fqbn", VARIANTS[variant]["fqbn"], "--input-dir", out_dir, "-p", port, SKETCH]
     print(f"Flashar från {os.path.relpath(out_dir, ROOT)}/ via {port} ...")
     p = subprocess.run(cmd, capture_output=True, text=True)
     log = p.stdout + p.stderr
@@ -187,14 +213,15 @@ def main():
     ap.add_argument("--ref", help="git-ref att bygga UART-varianten från (standard: main)")
     ap.add_argument("--build-only", action="store_true")
     ap.add_argument("--flash-only", action="store_true", help="flasha senaste bygget av varianten utan att bygga om")
-    ap.add_argument("--port", help="seriell port, annars letas /dev/serial/by-id/*Espressif*")
+    ap.add_argument("--port", help="seriell port (Windows: COMx). Annars letas /dev/serial/by-id/*Espressif* (Linux) eller /dev/cu.usbmodem* (macOS)")
     ap.add_argument("--timeout", type=int, default=120, help="sekunder att vänta på bootloadern")
     ap.add_argument("--arduino-cli", help="sökväg till arduino-cli")
+    ap.add_argument("--config", help="arduino-cli.yaml att använda (standard: Arduino IDE:s, ~/.arduinoIDE/arduino-cli.yaml)")
     a = ap.parse_args()
 
-    cli = find_arduino_cli(a.arduino_cli)
+    cli = find_arduino_cli(a.arduino_cli, a.config)
     core = check_core(cli)
-    print(f"arduino-cli: {cli}\nESP32-kärna: {core}")
+    print(f"arduino-cli: {' '.join(cli)}\nESP32-kärna: {core}")
 
     variant = a.variant or choose_variant()
     out_dir = os.path.join(BUILD, variant)
